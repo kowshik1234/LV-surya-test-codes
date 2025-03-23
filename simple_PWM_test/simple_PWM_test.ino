@@ -19,7 +19,6 @@
 
 #include <Arduino.h>
 #include "driver/mcpwm.h"
-#include <analogWrite.h>
 
 // Define the pins using macros (as provided)
 #define IR_850 2
@@ -39,7 +38,6 @@ int selected_pin = -1; // -1 indicates no pin is selected initially
 void setup() {
   Serial.begin(115200); // Initialize serial communication
   LM3409_setup();
-  analogWriteFrequency(500); 
 }
 
 void loop() {
