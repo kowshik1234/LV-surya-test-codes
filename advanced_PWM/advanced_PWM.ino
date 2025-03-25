@@ -162,15 +162,17 @@ void loop() {
               lm3409Duty = 255;
             }
             pwm_set_duty(MCPWM_UNIT_0, MCPWM_TIMER_0, lm3409Duty);
+            Serial.print("LM3409 New Duty Cycle: ");
+            Serial.println(lm3409Duty);
           } else {
             dutyCycles[selected_pin] += 10;
             if (dutyCycles[selected_pin] > 255) {
               dutyCycles[selected_pin] = 255;
             }
             ledcWriteChannel(selected_pin, dutyCycles[selected_pin]);
+            Serial.print("New Duty Cycle: ");
+            Serial.println(dutyCycles[selected_pin]);
           }
-          Serial.print("New Duty Cycle: ");
-          Serial.println(dutyCycles[selected_pin]);
           break;
         case 4:
           Serial.println("Decrease Duty Cycle (-10)");
@@ -180,15 +182,17 @@ void loop() {
               lm3409Duty = 0;
             }
             pwm_set_duty(MCPWM_UNIT_0, MCPWM_TIMER_0, lm3409Duty);
+            Serial.print("LM3409 New Duty Cycle: ");
+            Serial.println(lm3409Duty);
           } else {
             dutyCycles[selected_pin] -= 10;
             if (dutyCycles[selected_pin] < 0) {
               dutyCycles[selected_pin] = 0;
             }
             ledcWriteChannel(selected_pin, dutyCycles[selected_pin]);
+            Serial.print("New Duty Cycle: ");
+            Serial.println(dutyCycles[selected_pin]);
           }
-          Serial.print("New Duty Cycle: ");
-          Serial.println(dutyCycles[selected_pin]);
           break;
         case 5:
           selected_pin = -1; // Go back to pin selection
