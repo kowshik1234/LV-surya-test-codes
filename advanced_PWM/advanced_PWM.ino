@@ -32,7 +32,6 @@
 
 #define LM3409_pin 13
 
-
 // Define PWM channel numbers (0-7, ESP32-S3 has 8 independent PWM channels)
 #define IR_850_CHANNEL 0
 #define BLUE_CHANNEL 1
@@ -48,24 +47,26 @@
 // use 500 Hz as a LEDC base frequency
 #define LEDC_BASE_FREQ 500
 
-
 // Global variable to store the currently selected pin
 int selected_pin = -1; // -1 indicates no pin is selected initially
+
+// Global array to store current duty cycles for each channel
+int dutyCycles[8] = {0, 0, 0, 0, 0, 0, 0, 0};
+int lm3409Duty = 0;
 
 void setup() {
   Serial.begin(115200); // Initialize serial communication
   printPinList();
   LM3409_setup();
 
-  ledcAttachChannel(IR_850,     LEDC_BASE_FREQ, LEDC_TIMER_8_BIT, IR_850_CHANNEL);
-  ledcAttachChannel(BLUE,       LEDC_BASE_FREQ, LEDC_TIMER_8_BIT, BLUE_CHANNEL);
-  ledcAttachChannel(RED,        LEDC_BASE_FREQ, LEDC_TIMER_8_BIT, RED_CHANNEL);
-  ledcAttachChannel(WHITE,      LEDC_BASE_FREQ, LEDC_TIMER_8_BIT, WHITE_CHANNEL);
-  ledcAttachChannel(GREEN,      LEDC_BASE_FREQ, LEDC_TIMER_8_BIT, GREEN_CHANNEL);
-  ledcAttachChannel(VIOLET,     LEDC_BASE_FREQ, LEDC_TIMER_8_BIT, VIOLET_CHANNEL);
-  ledcAttachChannel(IR_950,     LEDC_BASE_FREQ, LEDC_TIMER_8_BIT, IR_950_CHANNEL);
-  ledcAttachChannel(Far_red_740,LEDC_BASE_FREQ, LEDC_TIMER_8_BIT, Far_red_740_CHANNEL);
-
+  ledcAttachChannel(IR_850, LEDC_BASE_FREQ, LEDC_TIMER_8_BIT, IR_850_CHANNEL);
+  ledcAttachChannel(BLUE, LEDC_BASE_FREQ, LEDC_TIMER_8_BIT, BLUE_CHANNEL);
+  ledcAttachChannel(RED, LEDC_BASE_FREQ, LEDC_TIMER_8_BIT, RED_CHANNEL);
+  ledcAttachChannel(WHITE, LEDC_BASE_FREQ, LEDC_TIMER_8_BIT, WHITE_CHANNEL);
+  ledcAttachChannel(GREEN, LEDC_BASE_FREQ, LEDC_TIMER_8_BIT, GREEN_CHANNEL);
+  ledcAttachChannel(VIOLET, LEDC_BASE_FREQ, LEDC_TIMER_8_BIT, VIOLET_CHANNEL);
+  ledcAttachChannel(IR_950, LEDC_BASE_FREQ, LEDC_TIMER_8_BIT, IR_950_CHANNEL);
+  ledcAttachChannel(Far_red_740, LEDC_BASE_FREQ, LEDC_TIMER_8_BIT, Far_red_740_CHANNEL);
 }
 
 void loop() {
@@ -131,82 +132,63 @@ void loop() {
     } else {
       // PWM Control Menu
       int selection = inputString.toInt(); // Convert the string to an integer
-      int current_duty; // Declare these outside the cases
-      int new_duty;
-      int lm34_duty;
 
       switch (selection) {
         case 1:
           Serial.println("PWM On and duty cycle set to 50%");
-          // PWM is already "on" in the sense that the pin is configured.
-          // You just need to set a duty cycle. To start, set it to half.
-          if(selected_pin == LM3409_pin)
-          {
-            lm34_duty = 50;
-            pwm_set_duty(MCPWM_UNIT_0, MCPWM_TIMER_0, lm34_duty);
-          }
-          else
-          {
+          if (selected_pin == LM3409_pin) {
+            lm3409Duty = 128; // 50% duty cycle for LM3409
+            pwm_set_duty(MCPWM_UNIT_0, MCPWM_TIMER_0, lm3409Duty);
+          } else {
+            dutyCycles[selected_pin] = 128; // 50% duty cycle
             ledcWriteChannel(selected_pin, 128);
           }
           break;
         case 2:
           Serial.println("PWM Off");
-          if(selected_pin == LM3409_pin)
-          {
-            lm34_duty = 0;
-            pwm_set_duty(MCPWM_UNIT_0, MCPWM_TIMER_0, lm34_duty);
-          }
-          else
-          {
+          if (selected_pin == LM3409_pin) {
+            lm3409Duty = 0;
+            pwm_set_duty(MCPWM_UNIT_0, MCPWM_TIMER_0, lm3409Duty);
+          } else {
+            dutyCycles[selected_pin] = 0;
             ledcWriteChannel(selected_pin, 0);
           }
           break;
         case 3:
           Serial.println("Increase Duty Cycle (+10)");
-          if(selected_pin == LM3409_pin)
-          {
-            lm34_duty +=10;
-            if(lm34_duty > 255)
-            {
-              lm34_duty = 255;
+          if (selected_pin == LM3409_pin) {
+            lm3409Duty += 10;
+            if (lm3409Duty > 255) {
+              lm3409Duty = 255;
             }
-            pwm_set_duty(MCPWM_UNIT_0, MCPWM_TIMER_0, lm34_duty);
-          }
-          else
-          {
-            current_duty = map(analogRead(selected_pin), 0, 1023, 0, 255); // Map the analog read to 0-255
-            new_duty = current_duty + 10;
-            if (new_duty > 255) {
-              new_duty = 255;
+            pwm_set_duty(MCPWM_UNIT_0, MCPWM_TIMER_0, lm3409Duty);
+          } else {
+            dutyCycles[selected_pin] += 10;
+            if (dutyCycles[selected_pin] > 255) {
+              dutyCycles[selected_pin] = 255;
             }
-            ledcWriteChannel(selected_pin, new_duty);
+            ledcWriteChannel(selected_pin, dutyCycles[selected_pin]);
           }
           Serial.print("New Duty Cycle: ");
-          Serial.println(new_duty);
+          Serial.println(dutyCycles[selected_pin]);
           break;
         case 4:
           Serial.println("Decrease Duty Cycle (-10)");
-          if(selected_pin == LM3409_pin)
-          {
-            lm34_duty -=10;
-            if(lm34_duty < 0)
-            {
-              lm34_duty = 0;
+          if (selected_pin == LM3409_pin) {
+            lm3409Duty -= 10;
+            if (lm3409Duty < 0) {
+              lm3409Duty = 0;
             }
-            pwm_set_duty(MCPWM_UNIT_0, MCPWM_TIMER_0, lm34_duty);
-          }
-          else
-          {
-            current_duty = map(analogRead(selected_pin), 0, 1023, 0, 255); // Map the analog read to 0-255
-            new_duty = current_duty - 10;
-            if (new_duty < 0) {
-              new_duty = 0;
+            pwm_set_duty(MCPWM_UNIT_0, MCPWM_TIMER_0, lm3409Duty);
+          } else {
+            dutyCycles[selected_pin] -= 10;
+            if (dutyCycles[selected_pin] < 0) {
+              dutyCycles[selected_pin] = 0;
             }
-            ledcWriteChannel(selected_pin, new_duty);
+            ledcWriteChannel(selected_pin, dutyCycles[selected_pin]);
           }
           Serial.print("New Duty Cycle: ");
-          Serial.println(new_duty);
+          Serial.println(dutyCycles[selected_pin]);
           break;
         case 5:
           selected_pin = -1; // Go back to pin selection
