@@ -114,7 +114,7 @@ void loop() {
         if(i==8)
         {
           // Serial.println("LM3409 value written %d",values[i]);
-          pwm_set_duty(MCPWM_UNIT_0, MCPWM_TIMER_0, values[i]);
+          pwm_set_duty(MCPWM_UNIT_0, MCPWM_TIMER_0, (values[i] / 255.0) * 100.0);
         }
         else
         {
