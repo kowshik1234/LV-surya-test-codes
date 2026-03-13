@@ -2,107 +2,188 @@
 #include "driver/mcpwm.h"
 
 // --- Hardware Mapping ---
-#define IR_850       2
-#define BLUE         42
-#define RED          40
-#define WHITE        38
-#define GREEN        36
-#define VIOLET       16
-#define IR_950       7
-#define Far_red_740  5
-#define LM3409_pin   13
+// Verify all pins against your specific ESP32 board schematic.
+#define IR_850      2
+#define BLUE        42
+#define RED         40
+#define WHITE       38
+#define GREEN       36
+#define VIOLET      16
+#define IR_950      7
+#define FAR_RED_740 5
+#define LM3409_PIN  13
 
 // --- PWM Configuration ---
-#define LEDC_TIMER_BIT 8     // 0-255 range
-#define LEDC_BASE_FREQ 500   // 500 Hz
-#define SERIAL_BAUD    115200 // Faster baud rate recommended
+#define LEDC_TIMER_BITS 8       // 8-bit resolution: duty range 0–255
+#define LEDC_FREQ_HZ    500     // Hz
+#define MCPWM_FREQ_HZ   500     // Hz — LM3409 PWM input frequency
+#define SERIAL_BAUD     115200
 
-// Array of pins for the 8 LEDC channels
-const uint8_t LED_PINS[8] = {IR_850, BLUE, RED, WHITE, GREEN, VIOLET, IR_950, Far_red_740};
+// --- Frame Protocol ---
+#define FRAME_START  'S'
+#define FRAME_TERM   ';'
+#define BUF_CAPACITY 64         // "S,255,255,...x9" is ~38 chars; 64 is safe
+#define NUM_VALUES   9          // 8 LEDC channels + 1 MCPWM channel
 
-// Buffer for incoming serial data
-char inputBuffer[64];
-int values[9];
+// LEDC channels 0–7 map to these pins, in order
+static const uint8_t LED_PINS[8] = {
+    IR_850, BLUE, RED, WHITE, GREEN, VIOLET, IR_950, FAR_RED_740
+};
 
-/**
- * Initialize the LM3409 via the MCPWM peripheral.
- * Note: MCPWM expects duty cycles in percentage (0.0 to 100.0).
- */
-void LM3409_setup() {
-    mcpwm_gpio_init(MCPWM_UNIT_0, MCPWM0A, LM3409_pin);
-    mcpwm_config_t pwm_config = {};
-    pwm_config.frequency = 500;
-    pwm_config.cmpr_a = 0;
-    pwm_config.cmpr_b = 0;
-    pwm_config.counter_mode = MCPWM_UP_COUNTER;
-    pwm_config.duty_mode = MCPWM_DUTY_MODE_0;
-    mcpwm_init(MCPWM_UNIT_0, MCPWM_TIMER_0, &pwm_config);
+// Non-blocking accumulation state
+static char    rxBuf[BUF_CAPACITY];
+static uint8_t rxIdx = 0;
+
+// -----------------------------------------------------------------------
+// LM3409 — MCPWM peripheral (legacy API)
+//
+// WARNING: The legacy MCPWM API is deprecated in ESP-IDF v5.x /
+// Arduino Core 3.x. It still compiles and works but will emit
+// deprecation warnings. To eliminate them, replace with the new
+// ESP-IDF MCPWM driver, or simply reassign LM3409_PIN to a spare
+// LEDC channel (ch 8 or higher) and remove this section entirely.
+// -----------------------------------------------------------------------
+static void lm3409_init(void) {
+    mcpwm_gpio_init(MCPWM_UNIT_0, MCPWM0A, LM3409_PIN);
+
+    mcpwm_config_t cfg = {};
+    cfg.frequency    = MCPWM_FREQ_HZ;
+    cfg.cmpr_a       = 0.0f;
+    cfg.cmpr_b       = 0.0f;             // OPR_B unused
+    cfg.counter_mode = MCPWM_UP_COUNTER;
+    cfg.duty_mode    = MCPWM_DUTY_MODE_0;
+    mcpwm_init(MCPWM_UNIT_0, MCPWM_TIMER_0, &cfg);
 }
 
-/**
- * Sets duty cycle for the LM3409.
- * Converts 0-255 input to 0.0-100.0 float for the driver.
- */
-void update_lm3409(int rawValue) {
-    float dutyPercent = (rawValue * 100.0) / 255.0;
-    if (dutyPercent > 100.0) dutyPercent = 100.0;
-    
-    mcpwm_set_signal_low(MCPWM_UNIT_0, MCPWM_TIMER_0, MCPWM_OPR_B);
-    mcpwm_set_duty(MCPWM_UNIT_0, MCPWM_TIMER_0, MCPWM_OPR_A, dutyPercent);
+// raw: 0–255 in, converted to 0.0–100.0 % duty for MCPWM.
+static void lm3409_write(int raw) {
+    raw = constrain(raw, 0, 255);
+    float duty = (raw * 100.0f) / 255.0f;
+
+    // Operate only on OPR_A — the operator tied to LM3409_PIN via MCPWM0A.
+    // Do NOT touch OPR_B; it is uninitialized and unconnected.
+    mcpwm_set_duty(MCPWM_UNIT_0, MCPWM_TIMER_0, MCPWM_OPR_A, duty);
     mcpwm_set_duty_type(MCPWM_UNIT_0, MCPWM_TIMER_0, MCPWM_OPR_A, MCPWM_DUTY_MODE_0);
 }
 
-/**
- * Parses a string in the format "S,v1,v2,v3,v4,v5,v6,v7,v8,v9"
- * Returns true only if all 9 values are found.
- */
-bool parse_frame(char* frame) {
-    if (frame[0] != 'S' || frame[1] != ',') return false;
+// -----------------------------------------------------------------------
+// Parser
+//
+// frame — null-terminated string, e.g. "S,0,128,255,0,0,0,0,0,42"
+//         The FRAME_TERM character has already been consumed.
+// out   — caller-supplied array of NUM_VALUES ints.
+// Returns true only if exactly NUM_VALUES values are parsed cleanly.
+// -----------------------------------------------------------------------
+static bool parse_frame(const char* frame, int out[NUM_VALUES]) {
+    if (frame[0] != FRAME_START || frame[1] != ',') return false;
 
-    char* token = strtok(frame + 2, ","); // Skip "S,"
-    int count = 0;
+    // strtok modifies the string in place — work on a local copy.
+    char tmp[BUF_CAPACITY];
+    strncpy(tmp, frame + 2, sizeof(tmp) - 1);
+    tmp[sizeof(tmp) - 1] = '\0';
 
-    while (token != NULL && count < 9) {
-        values[count] = atoi(token);
-        token = strtok(NULL, ",");
-        count++;
+    int   count = 0;
+    char* tok   = strtok(tmp, ",");
+
+    while (tok != NULL && count < NUM_VALUES) {
+        char* end = NULL;
+        long  val = strtol(tok, &end, 10);
+
+        if (end == tok) return false;   // No digits consumed — reject immediately
+
+        out[count++] = (int)constrain(val, 0L, 255L);
+        tok = strtok(NULL, ",");
     }
-    
-    return (count == 9); // Success only if we got exactly 9 values
+
+    return (count == NUM_VALUES);       // Fail if too few values
 }
 
+// -----------------------------------------------------------------------
+// Apply a fully validated frame to hardware.
+// -----------------------------------------------------------------------
+static void apply_frame(const int vals[NUM_VALUES]) {
+    for (int i = 0; i < 8; i++) {
+        ledcWriteChannel(i, (uint32_t)vals[i]);
+    }
+    lm3409_write(vals[8]);
+}
+
+// -----------------------------------------------------------------------
+// Validate and apply the accumulated null-terminated frame in rxBuf.
+// -----------------------------------------------------------------------
+static void process_frame(void) {
+    // Strip any stray trailing CR/LF that arrived before the terminator.
+    int len = (int)strlen(rxBuf);
+    while (len > 0 && (rxBuf[len - 1] == '\r' || rxBuf[len - 1] == '\n')) {
+        rxBuf[--len] = '\0';
+    }
+
+    // Skip any leading whitespace / line-endings from a corrupted prefix.
+    const char* start = rxBuf;
+    while (*start == '\r' || *start == '\n' || *start == ' ') ++start;
+
+    if (*start == '\0') return;     // Nothing meaningful — discard silently.
+
+    int vals[NUM_VALUES] = {};
+    if (parse_frame(start, vals)) {
+        apply_frame(vals);
+        Serial.println("OK");
+    } else {
+        Serial.print("ERR:BAD_FRAME ");
+        Serial.println(rxBuf);     // Echo the offending frame for diagnostics
+    }
+}
+
+// -----------------------------------------------------------------------
+// setup()
+// -----------------------------------------------------------------------
 void setup() {
     Serial.begin(SERIAL_BAUD);
-    Serial.setTimeout(10); // Reduce blocking time for Serial.readStringUntil
-    Serial.println("System Ready. Send frame as S,v1...v9;");
+    // No Serial.setTimeout() — non-blocking accumulation does not use
+    // readBytesUntil(), so a timeout has no useful effect here.
 
-    LM3409_setup();
+    lm3409_init();
 
-    // Initialize 8 LEDC channels using the Core 3.x API
+    // Requires ESP32 Arduino Core 3.x (ledcAttachChannel / ledcWriteChannel).
     for (int i = 0; i < 8; i++) {
-        ledcAttachChannel(LED_PINS[i], LEDC_BASE_FREQ, LEDC_TIMER_BIT, i);
+        ledcAttachChannel(LED_PINS[i], LEDC_FREQ_HZ, LEDC_TIMER_BITS, i);
+        ledcWriteChannel(i, 0);    // All LED channels off at startup
     }
+    lm3409_write(0);               // LM3409 off at startup
+
+    Serial.println("READY");
 }
 
+// -----------------------------------------------------------------------
+// loop() — Non-blocking single-byte accumulation.
+//
+// Primary terminator : ';'   (preferred — use serial.write(b"S,...,v9;"))
+// Fallback terminator: '\n'  (accepted — handles Python print() / \n frames)
+// '\r' is stripped silently  (Windows \r\n line endings, Arduino IDE monitor)
+// -----------------------------------------------------------------------
 void loop() {
-    if (Serial.available() > 0) {
-        // Read until the terminator ';'
-        size_t len = Serial.readBytesUntil(';', inputBuffer, sizeof(inputBuffer) - 1);
-        inputBuffer[len] = '\0'; // Null-terminate the string
+    while (Serial.available() > 0) {
+        char c = (char)Serial.read();
 
-        if (parse_frame(inputBuffer)) {
-            // 1. Update first 8 LEDs (Standard PWM)
-            for (int i = 0; i < 8; i++) {
-                ledcWriteChannel(i, values[i]);
+        if (c == FRAME_TERM || c == '\n') {
+            // End of frame — process whatever we have accumulated.
+            rxBuf[rxIdx] = '\0';
+            if (rxIdx > 0) {
+                process_frame();
             }
+            rxIdx = 0;              // Reset accumulator for the next frame.
 
-            // 2. Update LM3409 (MCPWM with Scaling)
-            update_lm3409(values[8]);
-            
-            // Optional: Debug output
-            // Serial.println("Frame Applied Successfully");
+        } else if (c == '\r') {
+            // Silently discard CR (harmless prefix to \n on Windows).
+
         } else {
-            Serial.println("Error: Invalid Frame Format");
+            if (rxIdx < BUF_CAPACITY - 1) {
+                rxBuf[rxIdx++] = c;
+            } else {
+                // No terminator before buffer filled — corrupted stream.
+                Serial.println("ERR:OVERFLOW");
+                rxIdx = 0;          // Discard and wait for the next frame.
+            }
         }
     }
 }
